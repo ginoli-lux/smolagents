@@ -17,7 +17,6 @@
 import base64
 import inspect
 import json
-import os
 import pickle
 import re
 import secrets
@@ -1097,11 +1096,9 @@ class TenkiExecutor(RemotePythonExecutor):
         sandbox_name (`str`, *optional*): Name for the sandbox. Defaults to "smolagent-executor-" followed by a random suffix.
         port (`int`, default `8888`): Port for the Jupyter Kernel Gateway to bind to inside the sandbox.
         create_kwargs (`dict`, *optional*): Additional keyword arguments to pass to the Tenki Sandbox create command,
-            e.g. `project_id`, `image`, `cpu_cores`, `memory_mb`. The sandbox image must provide
+            e.g. `workspace_id`, `image`, `cpu_cores`, `memory_mb`. The sandbox image must provide
             `python3`; the Jupyter Kernel Gateway (and `pip`, if missing) is installed on startup, so an image with
-            them preinstalled boots faster. If `project_id` is not provided, it is read from the `TENKI_PROJECT_ID`
-            environment variable, or resolved automatically when the account (or the given `workspace_id`) has a
-            single project.
+            them preinstalled boots faster.
     """
 
     # Bootstraps the Jupyter Kernel Gateway on any python3-capable image: no-op if already installed.
@@ -1128,7 +1125,7 @@ class TenkiExecutor(RemotePythonExecutor):
     ):
         super().__init__(additional_imports, logger, allow_pickle)
         try:
-            from tenki_sandbox import Client
+            from tenki import Client
         except ModuleNotFoundError:
             raise ModuleNotFoundError(
                 """Please install 'tenki' extra to use TenkiExecutor: `pip install 'smolagents[tenki]'`"""
@@ -1148,9 +1145,6 @@ class TenkiExecutor(RemotePythonExecutor):
         }
         self.client = Client(**client_kwargs)
         try:
-            if not create_kwargs.get("project_id"):
-                create_kwargs["project_id"] = self._resolve_project_id(self.client, create_kwargs.get("workspace_id"))
-
             self.logger.log("Starting Tenki sandbox", level=LogLevel.INFO)
             # Allocate without the server-side readiness wait, assign the handle, THEN wait: if
             # wait_ready() fails, self.sandbox is already set so cleanup() can terminate the session.
@@ -1183,9 +1177,6 @@ class TenkiExecutor(RemotePythonExecutor):
 
             self.installed_packages = self.install_packages(additional_imports)
             self.logger.log("Tenki sandbox is running", level=LogLevel.INFO)
-        except ValueError:
-            self.cleanup()
-            raise
         except Exception as e:
             self.cleanup()
             raise RuntimeError(f"Failed to initialize Tenki sandbox: {e}") from e
@@ -1194,23 +1185,6 @@ class TenkiExecutor(RemotePythonExecutor):
             # a Ctrl+C during the multi-second startup would leak the sandbox and client.
             self.cleanup()
             raise
-
-    @staticmethod
-    def _resolve_project_id(client, workspace_id: str | None = None) -> str:
-        """Resolve the Tenki project id from the environment or the account's sole project."""
-        project_id = os.getenv("TENKI_PROJECT_ID")
-        if project_id:
-            return project_id
-        identity = client.who_am_i()
-        workspaces = [ws for ws in identity.workspaces if workspace_id is None or ws.id == workspace_id]
-        projects = [project for workspace in workspaces for project in workspace.projects]
-        if len(projects) != 1:
-            raise ValueError(
-                f"Could not determine which Tenki project to use ({len(projects)} projects found): "
-                "set the TENKI_PROJECT_ID environment variable or pass create_kwargs={'project_id': ...} "
-                '(with CodeAgent: executor_kwargs={"create_kwargs": {"project_id": ...}})'
-            )
-        return projects[0].id
 
     def run_code_raise_errors(self, code: str) -> CodeOutput:
         """
